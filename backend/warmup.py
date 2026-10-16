@@ -167,12 +167,18 @@ class WarmupManager:
 
         try:
             with sync_playwright() as p:
+                args = [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
                 launch_kwargs = {
                     "user_data_dir": str(target_dir),
                     "headless": True,
                     "no_viewport": True,
                     "ignore_default_args": ["--enable-automation"],
-                    "args": ["--disable-blink-features=AutomationControlled"],
+                    "args": args,
                 }
                 brave_bin = get_brave_executable()
                 if brave_bin:
@@ -338,8 +344,16 @@ class WarmupManager:
         enable_reactions: bool,
         overall_start: float,
     ):
+        if sys.platform != "win32" and not os.environ.get("DISPLAY"):
+            headless = True
+
         with sync_playwright() as p:
-            args = ["--disable-blink-features=AutomationControlled"]
+            args = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ]
             if not headless:
                 args.append("--start-maximized")
 

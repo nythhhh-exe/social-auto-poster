@@ -1,4 +1,4 @@
-﻿import { useAccounts } from "../context/AccountsContext"
+import { useAccounts } from "../context/AccountsContext"
 import { useLogs } from "../context/LogsContext"
 import { Users, Send, CheckCircle, TrendingUp, Zap, Clock } from "lucide-react"
 import { useNavigate } from "react-router-dom"
@@ -43,7 +43,7 @@ export default function Dashboard() {
         ))}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+      <div className="dashboard-columns">
         <div className="card">
           <div className="card-header">
             <span className="card-title">Quick Actions</span>

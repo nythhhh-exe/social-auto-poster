@@ -15,12 +15,15 @@ import {
   Trash2,
   Heart,
   Users,
+  Clock,
+  Save,
+  Calendar,
 } from "lucide-react"
 import axios from "axios"
 
 import { API_BASE } from "../config"
 
-export default function WarmUp() {
+export default function WarmUp({ embed = false }) {
   const toast = useToast()
   const [duration, setDuration] = useState(10) // minutes per admin
   const [headless, setHeadless] = useState(true)
@@ -38,6 +41,20 @@ export default function WarmUp() {
   const [useRawString, setUseRawString] = useState(false)
   const [importingCookie, setImportingCookie] = useState(false)
   const [showGuide, setShowGuide] = useState(false)
+
+  // Automated Schedule state
+  const [scheduleConfig, setScheduleConfig] = useState({
+    enabled: false,
+    time: "09:00",
+    frequency: "daily",
+    duration_minutes: 10,
+    headless: true,
+    enable_reactions: true,
+    admin_ids: ["all"],
+    last_run: null,
+    nextRun: null,
+  })
+  const [savingSchedule, setSavingSchedule] = useState(false)
 
   const [statusData, setStatusData] = useState({
     isRunning: false,
@@ -61,6 +78,9 @@ export default function WarmUp() {
         axios.get(`${API_BASE}/warmup/admins`),
       ])
       setStatusData(statusRes.data)
+      if (statusRes.data.schedule) {
+        setScheduleConfig(statusRes.data.schedule)
+      }
       const fetchedAdmins = adminsRes.data.admins || []
       setAdmins(fetchedAdmins)
 
@@ -76,8 +96,20 @@ export default function WarmUp() {
     }
   }
 
+  const fetchSchedule = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/warmup/schedule`)
+      if (res.data) {
+        setScheduleConfig(res.data)
+      }
+    } catch {
+      // Backend offline
+    }
+  }
+
   useEffect(() => {
     fetchStatusAndAdmins()
+    fetchSchedule()
     const interval = setInterval(fetchStatusAndAdmins, 2000)
     return () => clearInterval(interval)
   }, [])
@@ -187,6 +219,49 @@ export default function WarmUp() {
     }
   }
 
+  const handleSaveSchedule = async (customConfig) => {
+    setSavingSchedule(true)
+    const payload = customConfig || scheduleConfig
+    try {
+      const res = await axios.post(`${API_BASE}/warmup/schedule`, payload)
+      setScheduleConfig(res.data)
+      toast(
+        payload.enabled
+          ? `⏰ Schedule enabled! Next auto-run: ${res.data.nextRun || res.data.time}`
+          : "⏹️ Automated warm-up schedule disabled.",
+        "success"
+      )
+    } catch (err) {
+      toast(`❌ Failed to save schedule: ${err.message}`, "error")
+    } finally {
+      setSavingSchedule(false)
+    }
+  }
+
+  const handleToggleScheduleEnabled = () => {
+    const updated = { ...scheduleConfig, enabled: !scheduleConfig.enabled }
+    setScheduleConfig(updated)
+    handleSaveSchedule(updated)
+  }
+
+  const formatScheduleNextRun = (nextRunStr) => {
+    if (!nextRunStr) return null
+    try {
+      const d = new Date(nextRunStr.replace(" ", "T"))
+      const now = new Date()
+      const diffMs = d.getTime() - now.getTime()
+      if (diffMs <= 0) return "Starting soon"
+      const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
+      const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60))
+      const timePart = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      const isToday = d.toDateString() === now.toDateString()
+      const dayPart = isToday ? "Today" : "Tomorrow"
+      return `${dayPart} at ${timePart} (in ${diffHours > 0 ? `${diffHours}h ` : ""}${diffMins}m)`
+    } catch {
+      return nextRunStr
+    }
+  }
+
   const progressPercent =
     statusData.totalSeconds > 0
       ? Math.min(100, Math.round((statusData.secondsElapsed / statusData.totalSeconds) * 100))
@@ -200,16 +275,18 @@ export default function WarmUp() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1 className="page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Flame size={26} style={{ color: "#ff6b4a" }} /> Multi-Admin Warm-Up (Anti-Ban)
-        </h1>
-        <p className="page-subtitle">
-          Automate scrolling, video watching, and auto-reactions (👍 & ❤️) across multiple Facebook Admin accounts in sequence
-        </p>
-      </div>
+      {!embed && (
+        <div className="page-header">
+          <h1 className="page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Flame size={26} style={{ color: "#ff6b4a" }} /> Multi-Admin Warm-Up (Anti-Ban)
+          </h1>
+          <p className="page-subtitle">
+            Automate scrolling, video watching, and auto-reactions (👍 & ❤️) across multiple Facebook Admin accounts in sequence
+          </p>
+        </div>
+      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 20 }}>
+      <div className="warmup-layout">
         {/* Left Column: Multi-Admin & Settings */}
         <div className="space-y-4">
           {/* Card 1: Multi-Admin Management */}
@@ -521,6 +598,11 @@ export default function WarmUp() {
             {statusData.isRunning && (
               <span className="pill pill-success" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span className="status-dot active" /> Running: {statusData.currentAdminName}
+              </span>
+            )}
+            {!statusData.isRunning && scheduleConfig.enabled && (
+              <span className="pill pill-info" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+                <Clock size={11} /> Auto-Warmup: {scheduleConfig.time}
               </span>
             )}
           </div>

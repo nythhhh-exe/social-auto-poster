@@ -6,6 +6,7 @@ import random
 import logging
 import asyncio
 import threading
+import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
 from playwright.sync_api import sync_playwright
@@ -16,6 +17,7 @@ logger.setLevel(logging.INFO)
 PROFILES_BASE = Path(__file__).parent / "profiles"
 PROFILES_BASE.mkdir(parents=True, exist_ok=True)
 ADMINS_FILE = PROFILES_BASE / "admins.json"
+WARMUP_SCHEDULE_FILE = PROFILES_BASE / "warmup_schedule.json"
 
 
 def get_brave_executable() -> Optional[str]:
@@ -46,6 +48,189 @@ class WarmupManager:
 
         # Auto-migrate legacy admin_profile if exists
         self._init_admins()
+
+        # Schedule handling & background scheduler
+        self.schedule = self._load_schedule()
+        self._start_scheduler()
+
+    def _load_schedule(self) -> dict:
+        default_schedule = {
+            "enabled": False,
+            "time": "09:00",
+            "frequency": "daily",
+            "duration_minutes": 10,
+            "headless": True,
+            "enable_reactions": True,
+            "admin_ids": ["all"],
+            "last_run": None,
+            "last_run_date": None,
+        }
+        if not WARMUP_SCHEDULE_FILE.exists():
+            return default_schedule
+        try:
+            with open(WARMUP_SCHEDULE_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            for k, v in default_schedule.items():
+                if k not in saved:
+                    saved[k] = v
+            return saved
+        except Exception as e:
+            logger.warning(f"Failed to load warmup schedule: {e}")
+            return default_schedule
+
+    def _save_schedule(self):
+        try:
+            with open(WARMUP_SCHEDULE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.schedule, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save warmup schedule: {e}")
+
+    def _compute_next_run(self) -> Optional[str]:
+        if not self.schedule.get("enabled"):
+            return None
+
+        freq = self.schedule.get("frequency", "daily")
+        now = datetime.datetime.now()
+
+        if freq == "daily":
+            t_str = self.schedule.get("time", "09:00")
+            try:
+                hour, minute = map(int, t_str.split(":"))
+            except Exception:
+                hour, minute = 9, 0
+
+            sched_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            last_run = self.schedule.get("last_run")
+
+            already_ran_for_slot = False
+            if last_run:
+                try:
+                    last_dt = datetime.datetime.strptime(last_run, "%Y-%m-%d %H:%M:%S")
+                    if last_dt >= sched_today:
+                        already_ran_for_slot = True
+                except Exception:
+                    pass
+
+            if now < sched_today:
+                # Time is still in the future today -> Run TODAY!
+                next_dt = sched_today
+            elif already_ran_for_slot:
+                # Already ran for today's scheduled time -> Run TOMORROW
+                next_dt = sched_today + datetime.timedelta(days=1)
+            else:
+                # The scheduled time has already passed today -> Run TOMORROW
+                next_dt = sched_today + datetime.timedelta(days=1)
+
+            return next_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        elif freq in ("every_6h", "every_12h"):
+            hours = 6 if freq == "every_6h" else 12
+            last_run = self.schedule.get("last_run")
+            if not last_run:
+                return now.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                last_dt = datetime.datetime.strptime(last_run, "%Y-%m-%d %H:%M:%S")
+                next_dt = last_dt + datetime.timedelta(hours=hours)
+                if next_dt < now:
+                    return now.strftime("%Y-%m-%d %H:%M:%S")
+                return next_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return now.strftime("%Y-%m-%d %H:%M:%S")
+
+        return None
+
+    def get_schedule(self) -> dict:
+        data = dict(self.schedule)
+        data["nextRun"] = self._compute_next_run()
+        return data
+
+    def update_schedule(self, new_config: dict) -> dict:
+        for k, v in new_config.items():
+            self.schedule[k] = v
+        self._save_schedule()
+        return self.get_schedule()
+
+    def _start_scheduler(self):
+        t = threading.Thread(target=self._scheduler_loop, daemon=True)
+        t.start()
+
+    def _scheduler_loop(self):
+        while True:
+            try:
+                time.sleep(3)
+                if not self.schedule.get("enabled"):
+                    continue
+
+                if self.is_running:
+                    continue
+
+                now = datetime.datetime.now()
+                freq = self.schedule.get("frequency", "daily")
+                should_trigger = False
+
+                if freq == "daily":
+                    t_str = self.schedule.get("time", "09:00")
+                    try:
+                        hour, minute = map(int, t_str.split(":"))
+                    except Exception:
+                        hour, minute = 9, 0
+
+                    sched_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    last_run = self.schedule.get("last_run")
+
+                    already_ran_for_slot = False
+                    if last_run:
+                        try:
+                            last_dt = datetime.datetime.strptime(last_run, "%Y-%m-%d %H:%M:%S")
+                            if last_dt >= sched_today:
+                                already_ran_for_slot = True
+                        except Exception:
+                            pass
+
+                    # Trigger if current time has reached sched_today and it hasn't run for this slot yet
+                    if now >= sched_today and not already_ran_for_slot:
+                        # Only auto-trigger if within 60 minutes of scheduled time
+                        if (now - sched_today).total_seconds() < 3600:
+                            should_trigger = True
+
+                elif freq in ("every_6h", "every_12h"):
+                    hours = 6 if freq == "every_6h" else 12
+                    last_run = self.schedule.get("last_run")
+                    if not last_run:
+                        should_trigger = True
+                    else:
+                        try:
+                            last_dt = datetime.datetime.strptime(last_run, "%Y-%m-%d %H:%M:%S")
+                            if (now - last_dt).total_seconds() >= hours * 3600:
+                                should_trigger = True
+                        except Exception:
+                            should_trigger = True
+
+                if should_trigger:
+                    admins = self.get_admins()
+                    if not admins:
+                        logger.warning("[WarmupScheduler] Trigger skipped: No Admin accounts available.")
+                        continue
+
+                    logger.info("[WarmupScheduler] Triggering scheduled Facebook Admin warm-up!")
+                    today_str = now.strftime("%Y-%m-%d")
+                    self.schedule["last_run"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                    self.schedule["last_run_date"] = today_str
+                    self._save_schedule()
+
+                    target_ids = self.schedule.get("admin_ids") or ["all"]
+                    duration = int(self.schedule.get("duration_minutes", 10))
+                    headless = bool(self.schedule.get("headless", True))
+                    reactions = bool(self.schedule.get("enable_reactions", True))
+
+                    self.start_warmup(
+                        admin_ids=target_ids,
+                        duration_minutes=duration,
+                        headless=headless,
+                        enable_reactions=reactions,
+                    )
+            except Exception as e:
+                logger.error(f"[WarmupScheduler] Error in scheduler loop: {e}")
 
     def _init_admins(self):
         if not ADMINS_FILE.exists():
@@ -105,6 +290,7 @@ class WarmupManager:
             "hasProfile": len(admins) > 0,
             "adminsCount": len(admins),
             "admins": admins,
+            "schedule": self.get_schedule(),
         }
 
     def import_admin_cookies(self, name: str = "", cookie_string: str = "", c_user: str = "", xs: str = "") -> dict:
@@ -193,16 +379,27 @@ class WarmupManager:
                 time.sleep(5)
                 final_url = page.url
 
-                # Harvest the FULL cookie jar — not just the seed cookies
+                # Harvest the FULL cookie jar — preserve seed if Facebook didn't return c_user
                 all_cookies = context.cookies("https://www.facebook.com")
+                has_c_user = any(c.get("name") == "c_user" and c.get("value") for c in all_cookies)
+
+                is_login = (
+                    "login" in final_url.lower()
+                    or "two_step_verification" in final_url.lower()
+                    or not has_c_user
+                    or page.locator("input[name='email'], input#email").count() > 0
+                )
+
                 cookie_file = target_dir / "cookies.json"
+                # If authenticated, save full jar; otherwise save seed cookies so c_user isn't lost
+                save_jar = all_cookies if has_c_user else cookies_to_add
                 with open(cookie_file, "w", encoding="utf-8") as f:
-                    json.dump(all_cookies, f, indent=2)
-                logger.info(f"Saved {len(all_cookies)} cookies for {c_user_val}: {[c['name'] for c in all_cookies]}")
+                    json.dump(save_jar, f, indent=2)
+                logger.info(f"Saved {len(save_jar)} cookies for {c_user_val}")
 
                 context.close()
 
-                if "login" in final_url.lower() or "two_step_verification" in final_url.lower():
+                if is_login:
                     return {
                         "status": "warning",
                         "c_user": c_user_val,
@@ -304,7 +501,12 @@ class WarmupManager:
             self.current_admin_name = admin["name"]
             self.current_action = f"[{idx+1}/{len(target_admins)}] Launching session for {admin['name']}..."
 
-            admin_dir = PROFILES_BASE / admin.get("profileDir", f"admin_{admin['c_user']}")
+            admin_dir_name = admin.get("profileDir") or f"admin_{admin['c_user']}"
+            admin_dir = PROFILES_BASE / admin_dir_name
+            # Fallback to admin_{c_user} if configured directory doesn't have cookies.json
+            if not (admin_dir / "cookies.json").exists() and (PROFILES_BASE / f"admin_{admin['c_user']}" / "cookies.json").exists():
+                admin_dir = PROFILES_BASE / f"admin_{admin['c_user']}"
+
             admin_dir.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -388,21 +590,38 @@ class WarmupManager:
                 logger.warning(f"[{admin['name']}] Navigation warning: {e}")
             time.sleep(4)
 
-            # Check if we landed on login page — if so, skip this admin
-            current_url = page.url
-            if "login" in current_url.lower() or "two_step_verification" in current_url.lower():
-                self.current_action = f"[{admin['name']}] ⚠️ Redirected to login! Please re-import cookies for this admin."
-                logger.warning(f"[{admin['name']}] Session expired - redirected to {current_url}")
+            # Robust login check: URL, DOM login inputs, and presence of c_user cookie
+            current_url = page.url.lower()
+            is_login_page = "login" in current_url or "two_step_verification" in current_url or "checkpoint" in current_url
+
+            if not is_login_page:
+                try:
+                    # If email or password input fields exist, user is definitely on the login landing screen
+                    if page.locator("input[name='email'], input#email, input[name='pass'], form[action*='login']").count() > 0:
+                        is_login_page = True
+                except Exception:
+                    pass
+
+            if not is_login_page:
+                current_cookies = context.cookies("https://www.facebook.com")
+                c_user_in_jar = any(c.get("name") == "c_user" and c.get("value") for c in current_cookies)
+                if not c_user_in_jar:
+                    is_login_page = True
+
+            if is_login_page:
+                self.current_action = f"[{admin['name']}] ⚠️ Session expired or redirected to login! Please re-sync or re-import cookies."
+                logger.warning(f"[{admin['name']}] Session expired - login screen detected at {page.url}")
                 try:
                     context.close()
                 except Exception:
                     pass
                 return
 
-            # Refresh & save cookie jar with any new cookies Facebook set this session
+            # Refresh & save cookie jar ONLY when verified authenticated (contains c_user)
             try:
                 refreshed = context.cookies("https://www.facebook.com")
-                if refreshed:
+                has_c_user = any(c.get("name") == "c_user" and c.get("value") for c in refreshed)
+                if refreshed and has_c_user:
                     with open(cookie_file, "w", encoding="utf-8") as f:
                         json.dump(refreshed, f, indent=2)
                     logger.info(f"[{admin['name']}] Refreshed {len(refreshed)} cookies")

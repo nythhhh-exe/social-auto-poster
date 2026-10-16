@@ -37,13 +37,44 @@ export function AccountsProvider({ children }) {
 
   const addAccounts = (newAccounts) => {
     let addedCount = 0
+    let updatedCount = 0
     const addedList = []
     setAccounts(prev => {
-      const existingIds = new Set(prev.map(a => String(a.pageId)))
+      const existingById = new Map()
+      const existingByName = new Map()
+      prev.forEach(a => {
+        existingById.set(String(a.pageId), a)
+        if (a.name) existingByName.set(a.name.toLowerCase().trim(), a)
+      })
+
       const toAdd = []
+      const updatedMap = new Map()
+
       newAccounts.forEach((acc, idx) => {
-        if (!existingIds.has(String(acc.pageId))) {
-          existingIds.add(String(acc.pageId))
+        const idKey = String(acc.pageId)
+        const nameKey = (acc.name || "").toLowerCase().trim()
+
+        // Match by Page ID or Page Name
+        const existing = existingById.get(idKey) || existingByName.get(nameKey)
+
+        if (existing) {
+          // Merge: keep real token if available, keep avatar, merge permanent status
+          const hasRealToken = existing.token && existing.token !== "browser_session"
+          const merged = {
+            ...existing,
+            ...acc,
+            id: existing.id,
+            pageId: hasRealToken ? existing.pageId : (acc.pageId || existing.pageId),
+            token: hasRealToken ? existing.token : (acc.token || existing.token),
+            avatar: existing.avatar || acc.avatar || null,
+            fans: Math.max(existing.fans || 0, acc.fans || 0),
+            isPermanent: existing.isPermanent || acc.isPermanent || false,
+            delegateId: acc.pageId !== existing.pageId ? acc.pageId : existing.delegateId,
+            status: "active",
+          }
+          updatedMap.set(existing.id, merged)
+          updatedCount++
+        } else {
           const item = {
             ...acc,
             id: Date.now() + idx,
@@ -53,11 +84,50 @@ export function AccountsProvider({ children }) {
           toAdd.push(item)
           addedList.push(item)
           addedCount++
+          existingById.set(idKey, item)
+          if (nameKey) existingByName.set(nameKey, item)
         }
       })
-      return [...prev, ...toAdd]
+
+      return prev.map(a => updatedMap.get(a.id) || a).concat(toAdd)
     })
-    return { addedCount, addedList }
+    return { addedCount, updatedCount, addedList }
+  }
+
+  const deduplicateAccounts = () => {
+    let removedCount = 0
+    setAccounts(prev => {
+      const groups = new Map()
+      prev.forEach(acc => {
+        const key = (acc.name || "").toLowerCase().trim()
+        if (!groups.has(key)) groups.set(key, [])
+        groups.get(key).push(acc)
+      })
+
+      const result = []
+      groups.forEach((list) => {
+        if (list.length === 1) {
+          result.push(list[0])
+        } else {
+          // Multiple accounts with same name: merge into single best account
+          const tokenAcc = list.find(a => a.token && a.token !== "browser_session")
+          const avatarAcc = list.find(a => a.avatar)
+          const primary = tokenAcc || list[0]
+
+          const merged = {
+            ...primary,
+            avatar: avatarAcc?.avatar || primary.avatar || null,
+            fans: Math.max(...list.map(a => a.fans || 0)),
+            isPermanent: list.some(a => a.isPermanent),
+            status: "active",
+          }
+          result.push(merged)
+          removedCount += (list.length - 1)
+        }
+      })
+      return result
+    })
+    return removedCount
   }
 
   const syncPages = async (tokenOverride) => {
@@ -92,6 +162,7 @@ export function AccountsProvider({ children }) {
       setMasterToken,
       addAccount,
       addAccounts,
+      deduplicateAccounts,
       syncPages,
       removeAccount,
       updateAccount,
